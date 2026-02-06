@@ -74,7 +74,8 @@ class ParameterSynchronizer:
             actor_rollout_workers,
             len(actor_rollout_workers),
             list(range(0, len(actor_rollout_workers))),
-            backend=get_nccl_backend(),
+            # backend=get_nccl_backend(),
+            backend="hccl", # 解决RuntimeError: NCCL is not available.
             group_name=self.sync_group_name,
         )
 

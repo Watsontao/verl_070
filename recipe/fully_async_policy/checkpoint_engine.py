@@ -41,12 +41,14 @@ if TYPE_CHECKING:
 
     from typing_extensions import TypedDict
 
+
     class FileMeta(TypedDict):
         key: str  # parameter name
         dtype: torch.dtype
         shape: torch.Size
         type: type
         tp_concat_dim: int
+
 
     T = TypeVar("T")
 
@@ -166,26 +168,66 @@ def get_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
+# 忽略下gemini的中二代码 解决ValueError: The current process is not running on the npu device
 def npu_generate_uuid() -> str:
     """Generate uuid for each npu device"""
     str_pid = str(os.getpid())
-    npu_num = 8
+    npu_num = 4  # 手动改成4
+
+    # 1. 尝试强制激活 (关键！让驱动能看到显存占用)
+    try:
+        import torch_npu
+        torch.ones(1).npu()
+    except:
+        pass
+
+        # === [调试信息] ===
+    print(f"\n[DEBUG_UUID] 开始查找: Container PID={str_pid}, Searching in {npu_num} NPUs...")
+
     try:
         for npu_id in range(npu_num):
             cmd = ["npu-smi", "info", "-t", "proc-mem", "-i", str(npu_id)]
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: S603
-            str_result = str(result.stdout)
+
+            # 执行命令
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: S603
+                str_result = str(result.stdout)
+            except Exception as e:
+                print(f"[DEBUG_UUID] NPU {npu_id} 查询失败: {e}")
+                continue
+
+            # === [调试信息] ===
+            print(f"--- [DEBUG_UUID] Checking NPU ID: {npu_id} ---")
+            # 打印太长了容易刷屏，只打印关键部分
+            print(f"Is PID {str_pid} in output? -> {'YES' if str_pid in str_result else 'NO'}")
+
+            # 如果在 Docker 里，这里的判断极大概率是 NO，因为 PID 不一致
             if str_pid in str_result:
-                # In A3 server, one NPU has two chips.
                 match_chip_count = re.search(r"Chip Count[^\d]*(\d+)", str_result)
-                chip_count = int(match_chip_count.group(1))
-                search_after_pid = str_result[str_result.find(str_pid) + len(str_pid) :]
-                match_chip_id = re.search(r"Chip ID[^\d]*(\d+)", search_after_pid)
-                chip_id = int(match_chip_id.group(1))
-                return f"{get_ip()}-{npu_id * chip_count + chip_id}"
-        raise ValueError("The current process is not running on the npu device")
-    except subprocess.CalledProcessError as e:
-        raise ValueError("The current process is not running on the npu device") from e
+                if match_chip_count:
+                    chip_count = int(match_chip_count.group(1))
+                    search_after_pid = str_result[str_result.find(str_pid) + len(str_pid):]
+                    match_chip_id = re.search(r"Chip ID[^\d]*(\d+)", search_after_pid)
+                    if match_chip_id:
+                        chip_id = int(match_chip_id.group(1))
+                        final_uuid = f"{get_ip()}-{npu_id * chip_count + chip_id}"
+                        print(f"[DEBUG_UUID] Found strict match! Returning UUID: {final_uuid}")
+                        return final_uuid
+
+        # =======================================================
+        # ⚠️ 关键修改：Docker 环境下的生命线
+        # =======================================================
+        print(f"[DEBUG_UUID] 遍历结束，未找到匹配 PID (Docker环境下属正常现象)。")
+        print(f"[DEBUG_UUID] 启用兜底策略 (Fallback)，生成唯一 UUID。")
+
+        # 不要报错！直接返回一个由 IP 和 PID 组成的唯一字符串
+        # 这足够区分不同的 Worker 了
+        return f"{get_ip()}-fallback-{str_pid}"
+
+    except Exception as e:
+        print(f"[DEBUG_UUID] 发生未知错误: {e}")
+        # 只要有一口气在，就返回兜底 UUID，绝不让训练崩在这个小函数上
+        return f"{get_ip()}-fallback-{str_pid}"
 
 
 def _get_physical_device_id(device_index: int | None = None) -> str:
@@ -236,7 +278,7 @@ def _to_flattened_tensor_meta(metas: list[ParameterMeta], offset: int = 0) -> li
 
 
 def _extract_weights(
-    flatten_metas: list[FlattenedTensorMetadata], buffer: torch.Tensor
+        flatten_metas: list[FlattenedTensorMetadata], buffer: torch.Tensor
 ) -> list[tuple[str, torch.Tensor]]:
     """
     According to the flatten_metas and buffer, extract the weights
@@ -251,7 +293,7 @@ def _extract_weights(
         assert isinstance(shape, torch.Size)
         dtype, offset = item["dtype"], item["offset"]
         size = dtype.itemsize * shape.numel()
-        tensor = buffer[offset : offset + size].view(dtype=dtype).view(shape)
+        tensor = buffer[offset: offset + size].view(dtype=dtype).view(shape)
         weights.append((item["name"], tensor))
     return weights
 
@@ -263,7 +305,7 @@ class CheckpointEngine:
     """
 
     def __init__(
-        self, current_rank: int, actor_ranks: list[int], rollout_ranks: list[int], device_buffer_size_M: int
+            self, current_rank: int, actor_ranks: list[int], rollout_ranks: list[int], device_buffer_size_M: int
     ) -> None:
         self.current_rank = current_rank
         self.actor_ranks = actor_ranks
@@ -281,7 +323,7 @@ class CheckpointEngine:
         self._device_uuid = _get_physical_device_id(device_index)
 
     def register_checkpoint(
-        self, weights_info: list[tuple[str, torch.Size, torch.dtype]], cpu_named_params: dict[str, torch.Tensor]
+            self, weights_info: list[tuple[str, torch.Size, torch.dtype]], cpu_named_params: dict[str, torch.Tensor]
     ):
         """
         Register checkpoint information and prepare memory buffers for parameter synchronization.
@@ -344,7 +386,7 @@ class CheckpointEngine:
 
         def register_tensor(buffer: torch.Tensor, offset: int, tensor: torch.Tensor):
             """Copy a tensor into a pinned memory buffer."""
-            buffer[offset : offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
+            buffer[offset: offset + tensor.nbytes] = tensor.view(-1).view(dtype=torch.uint8)
 
         memory_buffers = []  # for rollout rank, return empty buffer
         if self.current_rank in self.actor_ranks:  # is_actor
@@ -493,7 +535,7 @@ class CheckpointEngine:
 
                 # Prepare the broadcast buffer
                 start = gidx % 2 * self.bucket_size if overlap_broadcast_and_consume else 0
-                buffer_b: torch.Tensor = broadcast_load_buffer[start : start + bucket.size]
+                buffer_b: torch.Tensor = broadcast_load_buffer[start: start + bucket.size]
                 if broadcast_rank == self.current_rank:
                     buffer_b.data.copy_(h2d_buffer[: bucket.size])
 

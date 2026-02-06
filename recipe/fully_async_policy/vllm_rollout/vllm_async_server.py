@@ -61,7 +61,16 @@ class vLLMHttpServerForPartial(vLLMHttpServerBase):
         request_id: str,
         image_data: Optional[list[Any]] = None,
     ):
-        max_tokens = self.config.max_model_len - len(prompt_ids)
+        # Calculate physical limit (maximum available space in the model context)
+        limit_phys = self.config.max_model_len - len(prompt_ids)
+        
+        # P-DSR: Check if a soft limit was provided (from Fast Worker Guard)
+        if "max_tokens" in sampling_params:
+            limit_user = sampling_params.pop("max_tokens")
+            max_tokens = min(limit_phys, limit_user)
+        else:
+            max_tokens = limit_phys
+
         sampling_params["logprobs"] = 1
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)

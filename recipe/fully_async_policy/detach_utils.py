@@ -57,10 +57,16 @@ class ValidateMetrics:
     param_version: Optional[int] = None
 
 
-def prepare_single_generation_data(batch_dict, config) -> DataProto:
+def prepare_single_generation_data(batch_dict, config, override_n=None) -> DataProto:
     """
     Similar to the logic of ray_trainer._prepare_generate_batch, but for a single sample.
     Separate the data used for generation from the original data.
+
+    Args:
+        batch_dict: The input batch dictionary
+        config: Configuration object
+        override_n (int, optional): If set, override the number of rollouts (n). 
+                                    Useful for Probe (n=1) vs Rest (n=N-1).
 
     Returns:
         tuple: (original_batch_dict, gen_data_for_single_sample)
@@ -68,8 +74,17 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
 
     full_batch = DataProto.from_single_dict(batch_dict)
 
-    batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-    non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+    # --- P-DSR 版本兼容性修复 ---
+    # 背景：
+    # v0.5.0 (旧版): RLHFDataset 会在加载时立即 Tokenize 并计算 position_ids，因此这些 key 必然存在。
+    # v0.7.0 (新版): 采用“延迟 Tokenize”策略，Dataloader 产出的是原始文本，batch 中不含 position_ids 等张量。
+    # 为了让代码在两个版本下都能运行，我们改为动态检查：只 pop 那些确实存在的 Key，防止 DataProto.pop 报断言错误。
+    possible_batch_keys = ["input_ids", "attention_mask", "position_ids"]
+    batch_keys_to_pop = [k for k in possible_batch_keys if k in full_batch.batch.keys()]
+    
+    possible_non_tensor_keys = ["raw_prompt_ids"]
+    non_tensor_batch_keys_to_pop = [k for k in possible_non_tensor_keys if k in full_batch.non_tensor_batch.keys()]
+    # ----------------------------
 
     full_batch.pop(
         batch_keys=batch_keys_to_pop,
@@ -87,7 +102,8 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
         )
 
     # Add global step count to generated data
-    full_batch = full_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
+    repeat_times = override_n if override_n is not None else config.actor_rollout_ref.rollout.n
+    full_batch = full_batch.repeat(repeat_times=repeat_times, interleave=True)
     return full_batch
 
 
