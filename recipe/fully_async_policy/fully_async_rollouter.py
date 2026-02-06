@@ -634,13 +634,16 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 if rollout_sample.sample_id in self.sample_buffer:
                     # Update buffer with Probe Result (for final reassembly)
                     stored_data = self.sample_buffer[rollout_sample.sample_id]
-                    if isinstance(stored_data, dict) and 'input_ids' in stored_data: 
+                    
+                    # P-DSR v0.7.0 Fix: In v0.7.0, 'input_ids' doesn't exist in raw batch_dict.
+                    # We check if it's already wrapped. If not, wrap it.
+                    if isinstance(stored_data, dict) and 'input' not in stored_data: 
                          self.sample_buffer[rollout_sample.sample_id] = {
                              'input': stored_data,
                              'probe_ret': ret
                          }
                     else:
-                         # Robustness check
+                         # Already wrapped or other structure
                          self.sample_buffer[rollout_sample.sample_id]['probe_ret'] = ret
 
                 self.batch_aggregator[batch_id].append((rollout_sample.sample_id, probe_len))
