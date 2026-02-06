@@ -21,6 +21,7 @@ import numpy as np
 import ray
 from omegaconf import DictConfig
 
+from verl.utils.dataset.rl_dataset import get_dataset_class
 from recipe.fully_async_policy.vllm_rollout.vllm_async_server import FullyAsyncvLLMReplica
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
@@ -105,6 +106,10 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        
+        # P-DSR: Inject max_tokens from batch meta_info if present
+        if 'max_tokens' in batch.meta_info:
+             sampling_params['max_tokens'] = batch.meta_info['max_tokens']
 
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
@@ -180,12 +185,18 @@ class FullyAsyncAgentLoopWorker(AgentLoopWorkerBase):
                 )
 
                 agent_loop_config = _agent_loop_registry[agent_name]
+                
+                # v0.7.0 AgentLoop requires dataset_cls and dataset_config
+                dataset_cls = get_dataset_class(self.config.data)
+                
                 agent_loop = hydra.utils.instantiate(
                     config=agent_loop_config,
                     trainer_config=DictConfigWrap(config=self.config),
                     server_manager=self.server_manager,
                     tokenizer=self.tokenizer,
                     processor=self.processor,
+                    dataset_cls=dataset_cls,
+                    dataset_config=self.config.data,
                 )
                 output: AgentLoopOutput = await agent_loop.run(
                     sampling_params, cancellation_event=self.cancellation_event, **kwargs
